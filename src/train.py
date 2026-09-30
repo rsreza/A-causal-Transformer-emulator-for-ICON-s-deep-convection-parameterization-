@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 
@@ -37,8 +38,10 @@ from .column_spec import Z_INTERFACES
 from .dataset import build_dataloader
 from .model_factory import build_model, count_parameters
 from .normalize import Normalizer
-from .physics_loss import LossConfig, mass_conservation_loss, \
-    energy_conservation_loss, positivity_loss
+from .physics_loss import (
+    LossConfig, mass_conservation_loss,
+    energy_conservation_loss, positivity_loss,
+)
 from .utils import (
     load_config, set_seed, select_device, setup_logging, ensure_dir,
     is_distributed, get_rank, get_world_size, get_local_rank,
@@ -133,11 +136,13 @@ class NormalizedPhysicsLoss(nn.Module):
 # Training / validation
 # ---------------------------------------------------------------------------
 def train_one_epoch(model, loader, loss_fn, optimizer, device,
-                    scaler, grad_clip, amp_enabled, max_batches=-1):
+                    scaler, grad_clip, amp_enabled, max_batches=-1,
+                    rank=0, logger=None):
     model.train()
     totals = {"total": 0.0, "data": 0.0, "mass": 0.0,
               "energy": 0.0, "positivity": 0.0}
     n_batches = 0
+    n_skipped = 0
 
     for i, batch in enumerate(loader):
         if max_batches > 0 and i >= max_batches:
@@ -158,6 +163,10 @@ def train_one_epoch(model, loader, loss_fn, optimizer, device,
                 pred_norm = model(state_norm)
                 losses = loss_fn(pred_norm, target, state_raw)
                 loss = losses["total"]
+            if not torch.isfinite(loss):
+                n_skipped += 1
+                optimizer.zero_grad(set_to_none=True)
+                continue
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
@@ -167,6 +176,10 @@ def train_one_epoch(model, loader, loss_fn, optimizer, device,
             pred_norm = model(state_norm)
             losses = loss_fn(pred_norm, target, state_raw)
             loss = losses["total"]
+            if not torch.isfinite(loss):
+                n_skipped += 1
+                optimizer.zero_grad(set_to_none=True)
+                continue
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
@@ -174,6 +187,9 @@ def train_one_epoch(model, loader, loss_fn, optimizer, device,
         for k, v in losses.items():
             totals[k] += float(v.detach().cpu())
         n_batches += 1
+
+    if n_skipped > 0 and rank == 0 and logger is not None:
+        logger.warning(f"Skipped {n_skipped} non-finite batches during training")
 
     return {k: v / max(n_batches, 1) for k, v in totals.items()}
 
@@ -184,6 +200,7 @@ def validate(model, loader, loss_fn, device, max_batches=-1):
     totals = {"total": 0.0, "data": 0.0, "mass": 0.0,
               "energy": 0.0, "positivity": 0.0}
     n_batches = 0
+    n_skipped = 0
 
     for i, batch in enumerate(loader):
         if max_batches > 0 and i >= max_batches:
@@ -200,11 +217,19 @@ def validate(model, loader, loss_fn, device, max_batches=-1):
         pred_norm = model(state_norm)
         losses = loss_fn(pred_norm, target, state_raw)
 
+        if not torch.isfinite(losses["total"]):
+            n_skipped += 1
+            continue
+
         for k, v in losses.items():
             totals[k] += float(v.detach().cpu())
         n_batches += 1
 
-    return {k: v / max(n_batches, 1) for k, v in totals.items()}
+    if n_batches == 0:
+        # All batches were non-finite — return inf so early stopping triggers
+        return {k: float("inf") for k in totals}
+
+    return {k: v / n_batches for k, v in totals.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +265,7 @@ def train(cfg: dict, args: argparse.Namespace) -> dict:
         logger.info(f"Train batches: {len(train_loader)}, "
                     f"Val batches: {len(val_loader)}")
 
-    # Normalizer (already computed and cached by train dataset)
+    # Normalizer
     out_dir = Path(cfg["data"]["synthetic"]["output_dir"])
     normalizer = Normalizer.load(out_dir / "normalization.npz")
     if rank == 0:
@@ -310,7 +335,7 @@ def train(cfg: dict, args: argparse.Namespace) -> dict:
         train_losses = train_one_epoch(
             model, train_loader, loss_fn, optimizer, device,
             scaler, train_cfg["grad_clip"], amp_enabled,
-            max_batches=max_batches,
+            max_batches=max_batches, rank=rank, logger=logger,
         )
         val_losses = validate(
             model, val_loader, loss_fn, device, max_batches=max_batches,
@@ -338,7 +363,9 @@ def train(cfg: dict, args: argparse.Namespace) -> dict:
                 f"val: {val_losses['total']:.4f}"
             )
 
-        if rank == 0 and val_losses["total"] < best_val - 1e-6:
+        # Best-model checkpointing (skip if val is non-finite)
+        val_finite = torch.isfinite(torch.tensor(val_losses["total"])).item()
+        if rank == 0 and val_finite and val_losses["total"] < best_val - 1e-6:
             best_val = val_losses["total"]
             best_epoch = epoch + 1
             epochs_no_improve = 0
@@ -395,7 +422,13 @@ def main() -> None:
         cfg["seed"] = args.seed
     if args.epochs is not None:
         cfg["training"]["epochs"] = args.epochs
+
     train(cfg, args)
+
+    # Force-exit to skip C-library teardown, which can segfault on some
+    # systems due to HDF5/OpenMP conflicts between torch and system libs.
+    # All results are already saved at this point.
+    os._exit(0)
 
 
 if __name__ == "__main__":

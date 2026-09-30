@@ -22,17 +22,17 @@ data:
     chunk_size: 10000
 
 model:
-  name: mlp                       # "mlp" | "bilstm" | "transformer"
-  # Transformer-specific (also read by MLP/BiLSTM where applicable)
+  name: transformer               # "mlp" | "bilstm" | "transformer"
+  # Shared
+  t_past: 12
+  n_levels: 30
+  dropout: 0.1
+  cross_level_hidden: 128
+  # Transformer-specific
   d_model: 64
   n_heads: 4
   n_layers: 4
   d_ff: 128
-  dropout: 0.1
-  cross_level_hidden: 128
-  # Shared
-  t_past: 12
-  n_levels: 30
   # MLP-specific
   hidden_dims: [128, 128]
   precip_hidden: 64

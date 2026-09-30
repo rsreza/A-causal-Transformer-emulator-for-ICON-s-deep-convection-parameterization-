@@ -2,11 +2,6 @@
 
 Reads cfg['model'] and returns the right model class with the right
 hyperparameters. To add a new architecture, just add a branch here.
-
-Supported models:
-  - 'mlp'         : MLPConvectionEmulator
-  - 'bilstm'      : BiLSTMConvectionEmulator
-  - 'transformer' : CausalTransformerEmulator  (added in Step 6)
 """
 from __future__ import annotations
 
