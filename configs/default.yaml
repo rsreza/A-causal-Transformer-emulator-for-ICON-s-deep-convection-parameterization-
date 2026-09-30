@@ -22,15 +22,22 @@ data:
     chunk_size: 10000
 
 model:
-  name: transformer               # "transformer" | "mlp" | "bilstm"
+  name: mlp                       # "mlp" | "bilstm" | "transformer"
+  # Transformer-specific (also read by MLP/BiLSTM where applicable)
   d_model: 64
   n_heads: 4
   n_layers: 4
   d_ff: 128
   dropout: 0.1
   cross_level_hidden: 128
+  # Shared
   t_past: 12
   n_levels: 30
+  # MLP-specific
+  hidden_dims: [128, 128]
+  precip_hidden: 64
+  # BiLSTM-specific
+  hidden_size: 64
 
 training:
   distributed: false
@@ -48,6 +55,7 @@ training:
   device: auto
 
 loss:
+  lambda_data: 1.0
   lambda_mass: 0.1
   lambda_energy: 0.1
   lambda_pos: 0.05

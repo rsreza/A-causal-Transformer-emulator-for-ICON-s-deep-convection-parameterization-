@@ -19,6 +19,8 @@ data/raw/
 
 # Results (small metrics can be committed; checkpoints are large)
 results/checkpoints/*.pt
+results/checkpoints/*.json
+results/checkpoints_test/
 results/figures/*.png
 !results/figures/.gitkeep
 !results/metrics/.gitkeep

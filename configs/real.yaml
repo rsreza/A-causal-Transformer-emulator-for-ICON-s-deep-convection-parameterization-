@@ -1,3 +1,5 @@
+# Real-data config: ClimSim / NARVAL / QUBICC / ICON dumps on multi-GPU clusters.
+
 seed: 42
 
 data:
@@ -10,7 +12,7 @@ data:
     chunk_size: 10000
 
 model:
-  name: transformer
+  name: transformer             # "mlp" | "bilstm" | "transformer"
   d_model: 128
   n_heads: 8
   n_layers: 6
@@ -19,6 +21,11 @@ model:
   cross_level_hidden: 256
   t_past: 12
   n_levels: 30
+  # MLP-specific (unused when name=transformer)
+  hidden_dims: [256, 256]
+  precip_hidden: 128
+  # BiLSTM-specific (unused when name=transformer)
+  hidden_size: 128
 
 training:
   distributed: true
@@ -36,6 +43,7 @@ training:
   device: cuda
 
 loss:
+  lambda_data: 1.0
   lambda_mass: 0.1
   lambda_energy: 0.1
   lambda_pos: 0.05
