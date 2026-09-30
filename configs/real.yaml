@@ -1,0 +1,47 @@
+seed: 42
+
+data:
+  source: real
+  real:
+    train_file: data/prepared/train.nc
+    val_file:   data/prepared/val.nc
+    test_file:  data/prepared/test.nc
+    streaming: true
+    chunk_size: 10000
+
+model:
+  name: transformer
+  d_model: 128
+  n_heads: 8
+  n_layers: 6
+  d_ff: 256
+  dropout: 0.1
+  cross_level_hidden: 256
+  t_past: 12
+  n_levels: 30
+
+training:
+  distributed: true
+  n_gpus: 8
+  mixed_precision: true
+  batch_size: 256
+  epochs: 20
+  lr: 5.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  early_stopping_patience: 5
+  num_workers: 8
+  log_every: 50
+  checkpoint_dir: results/checkpoints
+  device: cuda
+
+loss:
+  lambda_mass: 0.1
+  lambda_energy: 0.1
+  lambda_pos: 0.05
+  huber_delta: 1.0
+
+eval:
+  results_dir: results
+  figures_dir: results/figures
+  metrics_dir: results/metrics

@@ -1,0 +1,59 @@
+# Default config: synthetic data path, CPU-runnable.
+# Switch to real data by editing data.source (see configs/real.yaml).
+
+seed: 42
+
+data:
+  source: synthetic                # "synthetic" or "real"
+  synthetic:
+    n_samples: 50000
+    n_train: 40000
+    n_val: 5000
+    n_test: 5000
+    regimes: [shallow, deep, organized, suppressed]
+    regime_probs: [0.30, 0.35, 0.20, 0.15]
+    output_dir: data/synthetic
+    noise_std: 0.02
+  real:
+    train_file: data/prepared/train.nc
+    val_file:   data/prepared/val.nc
+    test_file:  data/prepared/test.nc
+    streaming: true
+    chunk_size: 10000
+
+model:
+  name: transformer               # "transformer" | "mlp" | "bilstm"
+  d_model: 64
+  n_heads: 4
+  n_layers: 4
+  d_ff: 128
+  dropout: 0.1
+  cross_level_hidden: 128
+  t_past: 12
+  n_levels: 30
+
+training:
+  distributed: false
+  n_gpus: 1
+  mixed_precision: false
+  batch_size: 32
+  epochs: 20
+  lr: 1.0e-3
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  early_stopping_patience: 5
+  num_workers: 2
+  log_every: 50
+  checkpoint_dir: results/checkpoints
+  device: auto
+
+loss:
+  lambda_mass: 0.1
+  lambda_energy: 0.1
+  lambda_pos: 0.05
+  huber_delta: 1.0
+
+eval:
+  results_dir: results
+  figures_dir: results/figures
+  metrics_dir: results/metrics

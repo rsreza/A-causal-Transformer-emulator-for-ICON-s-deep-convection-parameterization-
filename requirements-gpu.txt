@@ -1,0 +1,5 @@
+-r requirements.txt
+# Install torch with CUDA separately:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+streamlit>=1.30
+jupyter>=1.0

@@ -1,0 +1,2 @@
+"""ICON Convection Transformer — package init."""
+__version__ = "0.1.0"
