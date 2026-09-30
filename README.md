@@ -2,9 +2,121 @@
 
 **A causal Transformer emulator for ICON's deep convection parameterization — with physics-constrained training and interpretable temporal attention.**
 
-[![tests](https://github.com/<user>/icon-convection-transformer/actions/workflows/tests.yml/badge.svg)](https://github.com/<user>/icon-convection-transformer/actions/workflows/tests.yml)
+[![tests](https://github.com/rsreza/A-causal-Transformer-emulator-for-ICON-s-deep-convection-parameterization-/actions/workflows/tests.yml/badge.svg)](https://github.com/rsreza/A-causal-Transformer-emulator-for-ICON-s-deep-convection-parameterization-/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+
+---
+
+## 🗺️ Workflow at a Glance
+
+![Workflow diagram](docs/workflow.png)
+
+The diagram shows the complete end-to-end pipeline. Follow the three bands
+from left to right:
+
+### 📊 Data — two paths, one canonical format
+
+Two independent data sources feed the same pipeline:
+
+- **Synthetic (CPU demo).** A 1-D mass-flux generator produces 50,000
+  column sequences with *planted ground truth*: each sequence is labeled
+  with its convective regime (shallow / deep / organized / suppressed) and
+  the true mass-flux profile. This runs in ~2 minutes on a single CPU and
+  lets anyone reproduce results without HPC access.
+
+- **Real (HPC).** ClimSim, NARVAL, QUBICC, or ICON dumps provide
+  physically realistic tendencies. These files are read lazily with
+  `xarray` chunked reads, so datasets larger than RAM are handled
+  transparently.
+
+Both paths converge to a **Canonical Column Format** — a fixed NetCDF
+layout with `state (T, q, q_c, q_i, u, v, p, z, Q_rad, Q_q)`, `tendency
+(dT/dt, dq/dt, dq_c/dt, dq_i/dt, du/dt, dv/dt)`, and surface precipitation.
+This format is defined once in `src/column_spec.py` and shared by every
+downstream component. **No source code changes are needed to switch
+between paths** — only the config file.
+
+The final preprocessing step is **Normalization**: per-variable mean and
+standard deviation are computed from the training set and cached to
+`data/synthetic/normalization.npz`.
+
+### 🧠 Training — causal Transformer + physics-constrained loss
+
+The core model is a **Causal Transformer** with:
+
+- Per-level linear embedding (`V_in → d_model=64`)
+- Four causal self-attention blocks, each with four heads
+- A cross-level mixing MLP that combines information across the 30 levels
+- Parallel heads for tendencies (per level) and precipitation (pooled)
+
+Causality is enforced with a **triangular mask** so that predictions at
+time *t* cannot attend to time *t' > t*. This is verified in
+`tests/test_transformer.py` by permuting future timesteps and confirming
+that earlier outputs are *bit-identical*.
+
+Training uses a **Physics-Constrained Loss** — a four-term composite:
+
+| Term | Meaning | Space |
+|---|---|---|
+| `L_data` | Huber loss on tendencies + precipitation | **normalized** |
+| `L_mass` | Column-integrated water budget residual | **physical** |
+| `L_energy` | Column-integrated enthalpy budget residual | **physical** |
+| `L_pos` | Condensate positivity after one Euler step | **physical** |
+
+Each term has its own weight (`λ_data`, `λ_mass`, `λ_energy`, `λ_pos`).
+The split between normalized and physical spaces is critical: the data
+loss must be in normalized units to keep gradient scales stable, while
+the physics losses must be in physical units (kg/m²/s, W/m², kg/kg) so
+the constraints mean something.
+
+The **AdamW optimizer** with cosine LR annealing, gradient clipping,
+early stopping, mixed precision (on CUDA), and DDP support trains the
+model. Every improvement in validation loss saves a checkpoint to
+`results/checkpoints/best.pt`.
+
+### 📈 Evaluation — four orthogonal analyses
+
+The trained checkpoint is evaluated four ways:
+
+1. **Offline metrics** — RMSE, bias, and Pearson correlation for each
+   output variable, computed in physical units.
+
+2. **Regime stratification** — the same metrics computed within each
+   convective regime, revealing which regimes the model handles well and
+   which it struggles with.
+
+3. **Conservation residuals** — mean absolute column-integrated mass and
+   energy imbalances, in physical units. These are exact numbers, not
+   normalized losses, so they can be reported alongside numerical model
+   diagnostics.
+
+4. **Attention analysis** — per-regime attention weights as a function
+   of lag time, with effective memory length quantified at 50 % and 90 %
+   cumulative attention. This is the interpretability contribution:
+   attention tells us *which past timesteps the model relied on*.
+
+### 📦 Output
+
+All artifacts are written to disk:
+
+- `results/metrics/*.json` — full metrics including per-regime breakdown
+- `results/figures/*.png` — tendency profiles, precipitation scatter,
+  attention heatmaps per layer
+- `results/checkpoints/best.pt` — trained model weights (best val loss)
+- `results/checkpoints/history.json` — per-epoch loss history
+
+### 🧭 Reproducibility
+
+The pipeline is designed to be rerun from scratch by anyone:
+
+- **50 unit tests** cover data loading, model forward passes, causality,
+  physics constraints, and the training loop
+- **GitHub Actions** runs the full test suite on every push
+- **Config-driven** — one YAML file controls everything; no code changes
+  between paths or architectures
+- **Two paths, one codebase** — synthetic and real share every module
+  except the data loader
 
 ---
 
@@ -121,8 +233,8 @@ synthetic dataset.
 
 ```bash
 # Clone and set up
-git clone https://github.com/<user>/icon-convection-transformer.git
-cd icon-convection-transformer
+git clone https://github.com/rsreza/A-causal-Transformer-emulator-for-ICON-s-deep-convection-parameterization-.git
+cd A-causal-Transformer-emulator-for-ICON-s-deep-convection-parameterization-
 python3 -m venv .venv && source .venv/bin/activate
 
 # Install (CPU-only torch for lighter downloads)
