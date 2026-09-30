@@ -6,15 +6,32 @@ Each sequence is a single atmospheric column evolving over 12 hours.
 A regime is chosen at the start; the column state evolves according to the
 simplified 1-D mass-flux model in data.convection_physics.
 
-Output: data/synthetic/{train,val,test}.nc
+Output format: .joblib (joblib memory-mapped pickle) — NOT NetCDF, NOT .npz.
+Rationale:
+  - NetCDF/HDF5 conflicts with PyTorch's C runtime on some Linux systems
+    (segfaults during file read).
+  - .npz (zlib-compressed and uncompressed) triggers CRC errors on systems
+    with limited RAM (< 8 GB), because the write buffer competes with the
+    in-memory dataset arrays.
+  - joblib writes via memory mapping, bypassing the page cache bottleneck.
+    It is the standard ML persistence format and handles large arrays robustly.
 
-Canonical NetCDF layout (dimensions: sample, time, level):
-    state       (n_sample, T_PAST, N_LEVELS, N_INPUT_VARS)   float32
-    tendency    (n_sample, T_PAST, N_LEVELS, N_OUTPUT_VARS)  float32
-    precip      (n_sample, T_PAST, N_PRECIP_VARS)            float32
-    metadata    (n_sample, N_META_VARS)                      float32
-    regime      (n_sample,)                                  int8
-    mass_flux   (n_sample, N_LEVELS)                         float32
+Real ICON/ClimSim data still uses NetCDF via StreamingColumnDataset.
+
+Output: data/synthetic/{train,val,test}.joblib + regime_profiles.npz
+
+Contents of each .joblib payload (dict):
+    state        (n_sample, T_PAST, N_LEVELS, N_INPUT_VARS)   float32
+    tendency     (n_sample, T_PAST, N_LEVELS, N_OUTPUT_VARS)  float32
+    precip       (n_sample, T_PAST, N_PRECIP_VARS)            float32
+    metadata     (n_sample, N_META_VARS)                      float32
+    regime       (n_sample,)                                  int8
+    mass_flux    (n_sample, N_LEVELS)                         float32
+    z_centers    (N_LEVELS,)                                  float32
+    z_interfaces (N_LEVELS+1,)                                float32
+    input_vars, output_vars, precip_vars, meta_vars           arrays of str
+    regime_names                                              array of str
+    t_past, n_levels                                          int
 """
 from __future__ import annotations
 
@@ -24,7 +41,6 @@ import time
 from pathlib import Path
 
 import numpy as np
-import xarray as xr
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -65,20 +81,16 @@ def generate_sequence(rng: np.random.Generator,
     target = 1.0 if regime != Regime.SUPPRESSED else 0.0
 
     for t in range(t_past):
-        # Update preconditioning scalar
         precond = precond * (1.0 - 1.0 / memory) + target / memory
 
-        # Apply regime-dependent moisture buildup to what the model sees
         q_eff = apply_preconditioning(state["q"], regime, precond)
         state_eff = dict(state)
         state_eff["q"] = q_eff
 
-        # Compute tendencies + diagnostic condensate
         tend, rain, snow, qc_diag, qi_diag = mass_flux_step(
             state_eff, regime, shf, lhf, Q_rad, Q_q, rng,
         )
 
-        # Fill input tensor (order MUST match INPUT_VARS)
         states[t, :, 0] = state["T"]
         states[t, :, 1] = q_eff
         states[t, :, 2] = state["qc"]
@@ -90,7 +102,6 @@ def generate_sequence(rng: np.random.Generator,
         states[t, :, 8] = Q_rad
         states[t, :, 9] = Q_q
 
-        # Fill output tensor (order MUST match OUTPUT_VARS)
         tendencies[t, :, 0] = tend["dT_dt"]
         tendencies[t, :, 1] = tend["dq_dt"]
         tendencies[t, :, 2] = tend["dqc_dt"]
@@ -101,10 +112,8 @@ def generate_sequence(rng: np.random.Generator,
         precips[t, 0] = rain
         precips[t, 1] = snow
 
-        # Advance: T, q, u, v prognostically; qc, qi diagnostically
         state = advance_state(state, tend, qc_diag, qi_diag)
 
-    # Metadata
     lat = rng.uniform(-30.0, 30.0)
     lon = rng.uniform(-180.0, 180.0)
     time_day = rng.uniform(0.0, 365.0)
@@ -172,46 +181,36 @@ def generate_dataset(n_samples: int,
     )
 
 
-def build_dataset_dict(data: dict, n_sample: int) -> xr.Dataset:
-    """Build an xarray Dataset in canonical layout."""
-    ds = xr.Dataset(
-        data_vars={
-            "state":    (("sample", "time", "level", "input_var"), data["state"]),
-            "tendency": (("sample", "time", "level", "output_var"), data["tendency"]),
-            "precip":   (("sample", "time", "precip_var"), data["precip"]),
-            "metadata": (("sample", "meta_var"), data["metadata"]),
-            "regime":   (("sample",), data["regime"].astype(np.int8)),
-            "mass_flux": (("sample", "level"), data["mass_flux"]),
-        },
-        coords={
-            "sample": np.arange(n_sample),
-            "time": np.arange(T_PAST),
-            "level": np.arange(N_LEVELS),
-            "input_var": INPUT_VARS,
-            "output_var": OUTPUT_VARS,
-            "precip_var": PRECIP_VARS,
-            "meta_var": META_VARS,
-            "z_centers": ("level", Z_CENTERS.astype(np.float32)),
-            "z_interfaces": (("level_iface",), Z_INTERFACES.astype(np.float32)),
-            "regime_names": (("regime_id",),
-                             [REGIME_NAMES[r] for r in Regime]),
-        },
-        attrs={
-            "description": "Synthetic convection dataset (planted regimes)",
-            "source": "data.generate_synthetic_convection",
-            "t_past": T_PAST,
-            "n_levels": N_LEVELS,
-            "n_input_vars": N_INPUT_VARS,
-            "n_output_vars": N_OUTPUT_VARS,
-        },
-    )
-    return ds
+def write_split(data: dict, n_samples: int, out_path: Path) -> None:
+    """Write a split using joblib (memory-mapped, robust for large arrays)."""
+    import joblib
+
+    payload = {
+        "state": data["state"],
+        "tendency": data["tendency"],
+        "precip": data["precip"],
+        "metadata": data["metadata"],
+        "regime": data["regime"],
+        "mass_flux": data["mass_flux"],
+        "z_centers": Z_CENTERS.astype(np.float32),
+        "z_interfaces": Z_INTERFACES.astype(np.float32),
+        "input_vars": np.array(INPUT_VARS),
+        "output_vars": np.array(OUTPUT_VARS),
+        "precip_vars": np.array(PRECIP_VARS),
+        "meta_vars": np.array(META_VARS),
+        "regime_names": np.array([REGIME_NAMES[r] for r in Regime]),
+        "t_past": T_PAST,
+        "n_levels": N_LEVELS,
+    }
+    joblib.dump(payload, out_path, compress=0)
+    size_mb = out_path.stat().st_size / 1e6
+    print(f"  wrote {out_path}   ({n_samples} samples, {size_mb:.1f} MB)")
 
 
 def split_and_write(data: dict,
                     n_train: int, n_val: int, n_test: int,
                     out_dir: Path) -> None:
-    """Split into train/val/test and write NetCDF files."""
+    """Split into train/val/test and write .joblib files."""
     n_total = data["state"].shape[0]
     assert n_train + n_val + n_test <= n_total, "split exceeds total"
 
@@ -226,11 +225,7 @@ def split_and_write(data: dict,
     for name, (i0, i1) in splits.items():
         n_split = i1 - i0
         sub = {k: v[i0:i1] for k, v in data.items()}
-        ds = build_dataset_dict(sub, n_split)
-        path = out_dir / f"{name}.nc"
-        ds.to_netcdf(path, engine="netcdf4")
-        size_mb = path.stat().st_size / 1e6
-        print(f"  wrote {path}   ({n_split} samples, {size_mb:.1f} MB)")
+        write_split(sub, n_split, out_dir / f"{name}.joblib")
 
 
 def main() -> None:
@@ -275,6 +270,7 @@ def main() -> None:
     print(f"  regime_probs  : {regime_probs}")
     print(f"  seed          : {seed}")
     print(f"  out_dir       : {out_dir}")
+    print(f"  format        : .joblib (memory-mapped, uncompressed)")
     print()
 
     data = generate_dataset(
@@ -283,7 +279,7 @@ def main() -> None:
     )
 
     print()
-    print("Splitting and writing NetCDF...")
+    print("Splitting and writing .joblib...")
     split_and_write(data, n_train, n_val, n_test, out_dir)
 
     profiles = {REGIME_NAMES[r]: regime_mass_flux_shape(r) for r in Regime}
@@ -291,9 +287,9 @@ def main() -> None:
 
     print()
     print("Done.")
-    print(f"  {out_dir}/train.nc")
-    print(f"  {out_dir}/val.nc")
-    print(f"  {out_dir}/test.nc")
+    print(f"  {out_dir}/train.joblib")
+    print(f"  {out_dir}/val.joblib")
+    print(f"  {out_dir}/test.joblib")
     print(f"  {out_dir}/regime_profiles.npz")
 
 

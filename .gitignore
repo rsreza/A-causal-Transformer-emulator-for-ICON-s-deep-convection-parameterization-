@@ -14,6 +14,8 @@ data/synthetic/
 data/prepared/
 data/raw/
 *.nc
+*.npz
+*.joblib
 
 # Results (small metrics can be committed; checkpoints are large)
 results/checkpoints/*.pt
@@ -29,3 +31,5 @@ Thumbs.db
 # Editors
 .vscode/
 .idea/
+*.swp
+*.swo
